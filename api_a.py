@@ -1,62 +1,62 @@
 from flask import Flask, jsonify
 import requests
-import time
+import redis
+import json
 
 app = Flask(__name__)
 
-# url da API B que vai fornecer os dados de clima
+# URL da API B (que fornece a temperatura)
 API_B_URL = "http://localhost:5001/weather/{}"
-# segundos para o cache expirar
+
+# Conexão com o Redis (padrão local)
+redis_client = redis.Redis(
+    host='localhost',
+    port=6379,
+    db=0,
+    decode_responses=True  # Retorna strings ao invés de bytes
+)
+
+# Tempo de cache: 60 segundos
 CACHE_EXPIRATION_SECONDS = 60
 
-# estrutura de cache
-weather_cache = {}
-
-# função que vai dar a recomendação de acordo com a temperatura
+# Gera uma recomendação com base na temperatura
 def gerar_recomendacao(temp):
     if temp > 30:
-        return "Está muito quente! Lembre-se de se hidratar e usar protetor solar."
+        return "o dia está muito quente, passe protetor"
     elif 15 < temp <= 30:
-        return "O clima está agradável. Aproveite o seu dia!"
+        return "o clima está bom, pode aproveitar"
     else:
-        return "Está frio! Não esqueça de usar um casaco."
+        return "frio demais, use um casaco"
 
-# rota da API A que gera a recomendação de acordo com a cidade
+# Endpoint principal: gera recomendação para uma cidade
 @app.route('/recommendation/<city>', methods=['GET'])
 def get_recommendation(city):
+    # Normaliza o nome da cidade para usar como chave no Redis
+    city_key = city.replace(" ", "").replace("_", "").lower()
 
-    # captura o tempo atual
-    current_time = time.time()
-    # normaliza o nome da cidade
-    city_key = city.replace(" ", "").replace("_", "")
+    # Tenta pegar do cache Redis
+    cached_data = redis_client.get(city_key)
 
-    # verifica se a cidade ta no cache e se ainda é valido 
-    if city_key in weather_cache:
-        cached = weather_cache[city_key]
-        if current_time - cached["timestamp"] < CACHE_EXPIRATION_SECONDS:
-            # usa o dado do cache
-            weather = cached["data"]
-            recomendacao = gerar_recomendacao(weather["temp"])
-            return jsonify({
-                **weather,
-                "recommendation": recomendacao,
-                "cached": True
-            })
+    if cached_data:
+        # Se encontrar, converte de JSON para dicionário
+        weather = json.loads(cached_data)
+        recomendacao = gerar_recomendacao(weather["temp"])
+        return jsonify({
+            **weather,
+            "recommendation": recomendacao,
+            "cached": True
+        }), 200
 
     try:
-        # chama a API B para obter o clima
+        # Se não estiver no cache, consulta a API B
         response = requests.get(API_B_URL.format(city))
-        # verifica se a resposta da API B teve sucesso
+
         if response.status_code == 200:
             weather = response.json()
 
-            # atualiza o cache
-            weather_cache[city_key] = {
-                "data": weather,
-                "timestamp": current_time
-            }
+            # Armazena o resultado no Redis com expiração
+            redis_client.setex(city_key, CACHE_EXPIRATION_SECONDS, json.dumps(weather))
 
-            # gera a recomendação de acordo com a temparatura 
             recomendacao = gerar_recomendacao(weather["temp"])
             return jsonify({
                 **weather,
@@ -64,12 +64,11 @@ def get_recommendation(city):
                 "cached": False
             }), 200
         else:
-            # erro caso a cidade não seja encontrada
             return jsonify({"error": "Cidade não encontrada na API B"}), 404
 
     except Exception as e:
-        # aponta erros genéricos
         return jsonify({"error": "Erro ao consultar a API B", "details": str(e)}), 500
 
+# Inicia a API na porta 5000
 if __name__ == '__main__':
     app.run(port=5000)
